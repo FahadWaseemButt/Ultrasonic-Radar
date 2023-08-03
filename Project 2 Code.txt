@@ -1,0 +1,322 @@
+#include "mbed.h"
+#include "TextLCD.h"
+#include "Keypad.h"
+#include "ultrasonic.h"
+#include "Servo.h"
+#include "millis.h"         // This library is used to avoid code blocking due to wait() function
+                            // millis() is a function that returns the number of milliseconds that
+                            // have passed since program start.
+
+Keypad kpad(PTC4, PTC3, PTC0, PTC7, PTC11, PTC10, PTC6, PTC5);              // Assign hardware pin numbers as per code req          
+TextLCD my_lcd(PTE20, PTE21, PTE22, PTE23, PTE29, PTE30, TextLCD::LCD16x2); // Assign hardware pin numbers as per code req
+SPI spi(PTD2, PTD3, PTD1);          // MOSI(Master Out Slave In (data output from master)), MISO(Master In Slave Out (data output from slave)), SCLK (Serial Clock (output from master))        8x8 LED Matrix
+DigitalOut cs(PTD0);                // Chip select              8x8 LED Matrix
+Servo ServoR(PTA5);                 // Assign variable name for PWM out and also pin number of port
+DigitalOut speaker(PTE31);           
+                                                   
+
+void uss_dist(int sensed_dist)
+{
+    //dist_mm = sensed_dist;
+}
+
+ultrasonic uss(PTD4, PTA12, .05, 1, &uss_dist);     // distance updated every 50 ms   (0.05)       
+
+// Angle display data for LED
+const unsigned char led_30[]= {0x00,0x00,0x00,0x00,0x00,0x06,0x06,0x00};  // 0 ~ 30 deg     // 8 bytes corresponding to 8 rows to light up LEDs as per desire (own angle pattern/quadrant)
+const unsigned char led_3060[]= {0x00,0x00,0x00,0x00,0x0F,0x09,0x09,0x0F};  // 30 ~ 60 deg
+const unsigned char led_6090[]= {0x00,0x00,0x00,0x00,0x0F,0x0F,0x0F,0x0F};  // 60 ~ 90 deg
+const unsigned char led_90120[]= {0x00,0x06,0x06,0x00,0x00,0x00,0x00,0x00};  // 90 ~ 120 deg
+const unsigned char led_120150[]= {0x0F,0x09,0x09,0x0F,0x00,0x00,0x00,0x00};  // 120 ~ 150 deg
+const unsigned char led_150180[]= {0x0F,0x0F,0x0F,0x0F,0x00,0x00,0x00,0x00};  // 150 ~ 180 deg
+const unsigned char led_180210[]= {0x00,0x60,0x60,0x00,0x00,0x00,0x00,0x00};  // 180 ~ 210 deg
+const unsigned char led_210240[]= {0xF0,0x90,0x90,0xF0,0x00,0x00,0x00,0x00};  // 210 ~ 240 deg
+const unsigned char led_240270[]= {0xF0,0xF0,0xF0,0xF0,0x00,0x00,0x00,0x00};  // 240 ~ 270 deg
+
+/// Send two bytes to SPI bus
+void SPI_Write2(unsigned char MSB, unsigned char LSB)
+{
+    cs = 0;           // Set CS Low   , this has to be done before data can be sent to 8x8 LED matrix
+    spi.write(MSB);   // Send two bytes
+    spi.write(LSB);
+    cs = 1;           // Set CS High, to stop further data transfer
+}
+
+/// MAX7219 initialisation
+void Init_MAX7219(void)
+{
+    SPI_Write2(0x09, 0x00);         // Decoding off
+    SPI_Write2(0x0A, 0x08);         // Brightness to intermediate
+    SPI_Write2(0x0B, 0x07);         // Scan limit = 7
+    SPI_Write2(0x0C, 0x01);         // Normal operation mode
+    SPI_Write2(0x0F, 0x0F);         // Enable display test
+    wait_ms(500);                   // 500 ms delay
+    SPI_Write2(0x01, 0x00);         // Clear row 0.
+    SPI_Write2(0x02, 0x00);         // Clear row 1.
+    SPI_Write2(0x03, 0x00);         // Clear row 2.
+    SPI_Write2(0x04, 0x00);         // Clear row 3.
+    SPI_Write2(0x05, 0x00);         // Clear row 4.
+    SPI_Write2(0x06, 0x00);         // Clear row 5.
+    SPI_Write2(0x07, 0x00);         // Clear row 6.
+    SPI_Write2(0x08, 0x00);         // Clear row 7.
+    SPI_Write2(0x0F, 0x00);         // Disable display test
+    wait_ms(500);                   // 500 ms delay
+}
+
+int main()
+{
+    uint32_t t_msec = 0;                                  // Define and initialise variables
+    uint32_t t_msec2 = 0;
+    uint32_t t_msec3 = 0;
+    uint32_t t_msec4 = 0;
+    float dist_mm = 0.0, dist_cm = 0.0, servo_pos = 0.0;
+    int x_index = 0, ser_deg=0, n = 0, status = 0;
+    uint8_t Once_Flg = 0;                                 // Define Flags (These will be used to make decisions to enter loop or not)
+    uint8_t Audio_Off_Flg = 1;
+    speaker=0.0;
+
+    my_lcd.cls();                       // Clear LCD                                           
+    wait(0.001);                                                
+    my_lcd.locate(0,0);                 // Move to First Row/Column of LCD display                                      
+    my_lcd.printf("Set Speed: 1;2;3");      
+    wait(1);
+    my_lcd.locate(0,1); 
+
+    // KEYPAD ENTRY START
+    char key;                                      // Define variable "key" as character                          
+    int released = 1;                              // Define variable "released" and assign value = 1    
+    char store_char[2];                            // Define an array "store_char" of length 2  
+    int j;                                         // Define "j" as int for loop purpose
+    LABEL:
+    j = 0;                                                 
+    while(j<2) {                                   // Loop 2 times                                      
+        key = kpad.ReadKey();                                   
+
+        if(key == '\0')                            // All keys released
+            released = 1;                          // Set the flag when all keys are released
+
+        if((key != '\0') && (released == 1)) {     // If a key is Pressed AND previous key was released
+
+            if (key == '#'){                       // If '#' is pressed break out of loop (exit keypad entry)
+                break;
+            }
+            else{
+                my_lcd.printf("%c", key);          // Store keypad entry character in variable "key"
+            }
+
+            store_char[j] = key;                   // Populate store_char array with inpit keypad characters
+            j++;                                                                                        // Increment loop
+            released = 0;                          // Clear the flag to indicate that key is still pressed
+        }
+    }              
+    sscanf(store_char, "%d", &n);                  // Reads data from "store_char" (specify as double) and stores in integer "n"
+
+    if(n == 1 || n == 2 || n == 3){                // If key pressed is either 1 OR 2 OR 3 , then start program
+        wait(1.0);
+        my_lcd.cls();
+        my_lcd.printf(" Program  Start ");
+    }
+    else {                                         // If any other key pressed, again ask for speed input
+        wait(1.0);
+        my_lcd.cls();
+        my_lcd.printf("  Wrong  Entry  ");
+        goto LABEL;
+    }                       
+    wait(1);
+    // KEYPAD ENTRY END
+
+    uss.startUpdates();    // Get distance sensor updates                                  
+    millisStart();         // Call milliStart() function to get millseconds elapsed                                      
+    t_msec = millis();   
+    t_msec2 = millis();
+    t_msec3 = millis();
+    t_msec4 = millis();                                        
+    my_lcd.cls();
+    wait(0.001);
+    
+// SPI stands for(Serial Peripheral Interface)
+
+    cs = 1;                    // CS initially High (to stop data transfer)
+    spi.format(8,0);           // 8-bit format, mode 0,0,  
+    spi.frequency(1000000);    // SCLK = 1 MHz   define operating frequency
+    Init_MAX7219();            // Initialize the LED controller
+
+    while(1)                                             // Infinite loop                                           
+    {   
+        if((millis() - t_msec2) >= 57)                   // After every 57 milliseconds get distance from sensor          
+        { 
+            uss.checkDistance();                                // Call checkDistance() function                              
+            dist_mm = uss.getCurrentDistance();                 // Read distance sensed by ultrasonic sensor                  
+            dist_cm = dist_mm/10;                               // Convert distance to cm              
+            t_msec2 = millis();                                 // assign t_msec2 the current value of millis() to start loop again after 57 ms
+        }   
+        
+    if((millis() - t_msec) >= 50)                               // Send servo command (PWM command) every 50 ms      
+    {
+        if (x_index >= 0  &&  x_index <= 270)                   // Loop from x_index from 0 to 270
+            {
+              servo_pos = 0.0037037037037037 * x_index;         // Map 0 ~ 270 to 0 ~ 1, divide x_index 270 (Normalize)
+              ServoR = servo_pos;                               // Send normalized x_index value to Servo (servo PWM command)
+              ser_deg = servo_pos * 270;                        // Rework degrees from normalized value to display on LCD       
+              x_index = x_index + n;                            // Increment loop ( by 1 OR 2 OR 3)  depending on speed input from keypad [0 1 2 ...270 OR 0 2 4 6 ...270 OR 0 3 6 9 ... 270]
+              t_msec = millis();            
+            }
+            
+            else if (x_index > 270 && x_index <= 540)
+                {
+                servo_pos = -0.0037037037037037 * x_index + 2;  // In this loop we map 270 ~ 540 to 1 ~ 0. Thus servo reverses direction , 270 deg to 0 deg 
+                ServoR = servo_pos;
+                ser_deg = servo_pos * 270;                     
+                x_index = x_index + n;                                 
+                if(x_index >= 540) x_index = 0;                 // If x_index equals or exceeds 540 , set x_index to 0 to start over again (Line 157)
+                t_msec = millis();                
+                }                       
+        }
+
+        my_lcd.locate(0,0);
+        my_lcd.printf("Angle = %3d deg ", ser_deg);
+        wait(0.001);
+
+        if (dist_cm >= 3 && dist_cm <= 50)                              // If Object within range, show data and exit
+        {
+            if(Once_Flg==0)                                             // If Once_Flg = 0 , enter
+            {  
+                Once_Flg = 1;                                           // Block entry in this segment to freeze display of target distance and angle, for LED matrix also 
+                t_msec4 = millis();                                     // Update t_msec4 here to ensure audio plays for max 2 sec
+                speaker=0.0;
+                Audio_Off_Flg=0;                                        // Enable Audio   
+                my_lcd.locate(0,1);
+                my_lcd.printf("OB=%4.1fcm/%3ddeg", dist_cm, ser_deg);
+                wait(0.001);
+    
+                // 8x8 LED Logic to show angle 
+
+                if (ser_deg >= 0 && ser_deg <= 30){     // Send 8 bytes of data as provided above, as per relevant angle segments
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)           // loop from i=1 to 8
+                    {
+                        SPI_Write2(i,led_30[i-1]);      // led_30[0],led_30[1]...led_30[7]
+                    }      
+                    wait(0.0001);                       // 0.1 msec delay                                
+                }       
+                else if (ser_deg > 30 && ser_deg <= 60){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_3060[i-1]);
+                    }      
+                    wait(0.0001);       
+                }       
+                else if (ser_deg > 60 && ser_deg <= 90){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_6090[i-1]);
+                    }      
+                    wait(0.0001);      
+                }
+                else if (ser_deg > 90 && ser_deg <= 120){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_90120[i-1]);
+                    }      
+                    wait(0.0001);                                              
+                }
+                else if (ser_deg > 120 && ser_deg <= 150){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_120150[i-1]);
+                    }      
+                    wait(0.0001);                                    
+                }
+                else if (ser_deg > 150 && ser_deg <= 180){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_150180[i-1]);
+                    }      
+                    wait(0.0001);     
+                }
+                else if (ser_deg > 180 && ser_deg <= 210){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_180210[i-1]);
+                    }      
+                    wait(0.0001);
+                } 
+                else if (ser_deg > 210 && ser_deg <= 240){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_210240[i-1]);
+                    }      
+                    wait(0.0001);
+                } 
+                else if (ser_deg > 240 && ser_deg <= 270){
+                    for(int i=1; i<9; i++)              // Write first character (8 rows)
+                    {
+                        SPI_Write2(i,led_240270[i-1]);
+                    }      
+                    wait(0.0001);
+                }
+                    // 8x8 LED Logic ends here
+            }
+        }
+         else if (dist_cm < 3 || dist_cm > 50){   
+            Once_Flg = 0;                          // Enable Once_Flg   This allows multiple object detection. After object detected it has to enter scanning to be ready for next object detection
+            speaker=0.0;
+            my_lcd.locate(0,1);
+            my_lcd.printf("S C A N N I N G ");
+            wait(0.001);
+        }
+
+//  Audio Logic Start
+
+                if (dist_cm >= 3 && dist_cm <= 10)
+                {   
+                    if ((millis() - t_msec3) >= 5 && Once_Flg ==1 && Audio_Off_Flg==0)
+                        {   
+                            status = !status;                                           // NOT logic status initially 0 , it will become 1,0,1,... as long as loop is running after every 5 msec
+                            speaker=status;
+                            t_msec3 = millis();                         
+                }       
+                if ((millis() - t_msec4) >= 2000 && Once_Flg ==1 && Audio_Off_Flg==0)
+                {
+                    speaker=0.0;                                                        // After 2 sec the speaker is turned off
+                    Audio_Off_Flg=1;      
+                }                                      
+                }       
+                else if (dist_cm > 10 && dist_cm <= 30)
+              {
+                        if ((millis() - t_msec3) >= 15 && Once_Flg ==1 && Audio_Off_Flg==0)
+                            {   
+                                status = !status;
+                                speaker=status;
+                                t_msec3 = millis();                         
+                    }       
+                if ((millis() - t_msec4) >= 2000 && Once_Flg ==1 && Audio_Off_Flg==0)
+                {
+                    speaker=0.0;
+                    Audio_Off_Flg=1;      
+                }                                    
+              }       
+            else if (dist_cm > 30 && dist_cm <= 50)
+            {
+                    if ((millis() - t_msec3) >= 25 && Once_Flg ==1 && Audio_Off_Flg==0)
+                            {   
+                                status = !status;
+                                speaker=status;
+                                t_msec3 = millis();                         
+                    }       
+                    if ((millis() - t_msec4) >= 2000 && Once_Flg ==1 && Audio_Off_Flg==0)
+                    {
+                        speaker=0.0;
+                        Audio_Off_Flg=1;      
+                    }              
+            }
+// Audio Logic ends here
+
+// Update Once Flag
+        if ((x_index >= 270 && x_index <= 271)|| (x_index >= 539 && x_index <=540))   // When extreme position is reached , Once_Flg is again enabled to detect object                                         
+            {                                               
+            wait(0.001);
+            Once_Flg=0;           
+            }       
+    } // while(1) ends here
+
+} //END MAIN
